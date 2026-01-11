@@ -165,7 +165,17 @@ namespace
 		const uint32_t paddedNameLength = bitUtil::RoundUpToMultiple(nameLength + 1u, 4u);
 
 		// includes the lengths of the layer mask data and layer blending ranges data
-		return (4u + 4u + paddedNameLength);
+		uint32_t size = 4u + 4u + paddedNameLength;
+
+		// add the length of tagged blocks
+		for(uint32_t i = 0u; i < layer->taggedBlockCount; ++i)
+		{
+			uint32_t dataSize = layer->taggedBlocks[i].size;
+			uint32_t paddedDataSize = bitUtil::RoundUpToMultiple(dataSize, 2u);
+			size += 12u + paddedDataSize; // signature (4) + tag (4) + size (4) + data (padded)
+		}
+
+		return size;
 	}
 
 
@@ -399,6 +409,15 @@ void DestroyExportDocument(ExportDocument*& document, Allocator* allocator)
 			}
 			data = nullptr;
 		}
+
+		if (document->layers[i].taggedBlocks)
+		{
+			for(uint32_t b=0; b < document->layers[i].taggedBlockCount; ++b)
+			{
+				memoryUtil::FreeArray(allocator, document->layers[i].taggedBlocks[b].data);
+			}
+			memoryUtil::FreeArray(allocator, document->layers[i].taggedBlocks);
+		}
 	}
 
 	memoryUtil::Free(allocator, document);
@@ -485,8 +504,42 @@ unsigned int AddLayer(ExportDocument* document, Allocator* allocator, const char
 
 	ExportLayer* layer = document->layers + index;
 	layer->name = CreateString(allocator, name);
-
+	layer->taggedBlocks = nullptr;
+	layer->taggedBlockCount = 0u;
 	return index;
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------------------------------
+void AddLayerTaggedBlock(ExportDocument* document, Allocator* allocator, unsigned int layerIndex, uint32_t key, void* data, uint32_t size)
+{
+    ExportLayer* layer = document->layers + layerIndex;
+    
+    ExportTaggedBlock* newBlocks = memoryUtil::AllocateArray<ExportTaggedBlock>(allocator, layer->taggedBlockCount + 1);
+    if (layer->taggedBlocks)
+    {
+        memcpy(newBlocks, layer->taggedBlocks, sizeof(ExportTaggedBlock) * layer->taggedBlockCount);
+        memoryUtil::FreeArray(allocator, layer->taggedBlocks);
+    }
+    layer->taggedBlocks = newBlocks;
+    
+    ExportTaggedBlock& block = layer->taggedBlocks[layer->taggedBlockCount];
+    block.key = key;
+    block.size = size;
+	if ((size > 0u) && (data != nullptr))
+	{
+		block.data = memoryUtil::AllocateArray<uint8_t>(allocator, size);
+		memcpy(block.data, data, size);
+	}
+	else
+	{
+		block.data = nullptr;
+		block.size = 0u;
+	}
+
+    
+    layer->taggedBlockCount++;
 }
 
 
@@ -1293,6 +1346,26 @@ void WriteDocument(ExportDocument* document, Allocator* allocator, File* file)
 		const uint32_t paddedNameLength = bitUtil::RoundUpToMultiple(nameLength + 1u, 4u);
 		fileUtil::WriteToFileBE(writer, nameLength);
 		writer.Write(layer->name, paddedNameLength - 1u);
+
+		for (uint32_t j = 0; j < layer->taggedBlockCount; ++j)
+		{
+			const ExportTaggedBlock& block = layer->taggedBlocks[j];
+			
+			// signature '8BIM'
+			fileUtil::WriteToFileBE(writer, util::Key<'8', 'B', 'I', 'M'>::VALUE);
+			
+			fileUtil::WriteToFileBE(writer, block.key);
+			
+			fileUtil::WriteToFileBE(writer, block.size);
+			
+			writer.Write(block.data, block.size);
+			
+			// padding (add one 0 if size is odd)
+			if (block.size % 2 != 0)
+			{
+				fileUtil::WriteToFileBE(writer, static_cast<uint8_t>(0));
+			}
+		}
 	}
 
 	// per-layer data

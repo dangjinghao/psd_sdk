@@ -6,6 +6,17 @@
 
 PSD_NAMESPACE_BEGIN
 
+
+/// \ingroup Types
+/// \struct ExportTaggedBlock
+/// \brief A struct representing a tagged block as part of a layer.
+struct ExportTaggedBlock
+{
+	uint32_t key;
+	void* data;
+	uint32_t size;
+};
+
 /// \ingroup Types
 /// \class ExportLayer
 /// \brief A struct representing a layer as exported to the Layer Mask section.
@@ -23,6 +34,9 @@ struct ExportLayer
 	void* channelData[MAX_CHANNEL_COUNT];
 	uint32_t channelSize[MAX_CHANNEL_COUNT];
 	uint16_t channelCompression[MAX_CHANNEL_COUNT];
+
+	ExportTaggedBlock* taggedBlocks;
+	uint32_t taggedBlockCount;
 };
 
 PSD_NAMESPACE_END
