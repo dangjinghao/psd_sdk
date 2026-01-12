@@ -108,6 +108,8 @@ set(psd_source_util
   PsdKey.h
   PsdMemoryUtil.h
   PsdMemoryUtil.inl
+  PsdStringUtil.h
+  PsdStringUtil.cpp
   PsdSyncFileReader.h
   PsdSyncFileReader.cpp
   PsdSyncFileUtil.h
@@ -159,3 +161,5 @@ source_group("Source Files/Types" FILES ${psd_source_types})
 source_group("Source Files/Util" FILES ${psd_source_util})
 source_group("Source Files/Zip" FILES ${psd_source_zip})
 source_group("Source Files" FILES ${psd_source_})
+
+target_include_directories(Psd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
