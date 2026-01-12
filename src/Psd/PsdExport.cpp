@@ -367,13 +367,21 @@ namespace
 				offset += compressedSize;
 			}
 
-			outPlaneRle[c].data = compressed;
-			outPlaneRle[c].size = offset;
-
 			if (!ok)
 			{
+				// Clean up current compressed buffer and all previously allocated plane data
+				memoryUtil::FreeArray(allocator, compressed);
+				for (uint16_t p = 0u; p < c; ++p)
+				{
+					memoryUtil::FreeArray(allocator, outPlaneRle[p].data);
+					outPlaneRle[p].data = nullptr;
+					outPlaneRle[p].size = 0u;
+				}
 				break;
 			}
+
+			outPlaneRle[c].data = compressed;
+			outPlaneRle[c].size = offset;
 		}
 
 		memoryUtil::FreeArray(allocator, rowBuffer);
