@@ -2,7 +2,7 @@
 # Copyright 2023, heavenstone <heavenstone1308@gmail.com>
 # See LICENSE.txt for licensing details (2-clause BSD License: https://opensource.org/licenses/BSD-2-Clause)
 
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.10)
 
 project(Psd)
 
