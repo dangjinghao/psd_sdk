@@ -7,6 +7,7 @@
 #include "PsdExportMetaDataAttribute.h"
 #include "PsdExportLayer.h"
 #include "PsdAlphaChannel.h"
+#include "PsdCompressionType.h"
 
 
 PSD_NAMESPACE_BEGIN
@@ -26,6 +27,7 @@ struct ExportDocument
 	uint32_t height;
 	uint16_t bitsPerChannel;
 	exportColorMode::Enum colorMode;
+	uint16_t mergedImageCompression;
 
 	ExportMetaDataAttribute attributes[MAX_ATTRIBUTE_COUNT];
 	unsigned int attributeCount;

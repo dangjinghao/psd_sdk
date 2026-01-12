@@ -112,6 +112,12 @@ void UpdateMergedImage(ExportDocument* document, Allocator* allocator, const flo
 
 
 /// \ingroup Exporter
+/// Sets the compression used for the merged (composite) image data in the PSD's final Image Data section.
+/// Default is RAW for backwards compatibility. Note that 32-bit documents are always written as RAW.
+void SetMergedImageCompression(ExportDocument* document, compressionType::Enum compression);
+
+
+/// \ingroup Exporter
 /// Exports a document to the given file.
 void WriteDocument(ExportDocument* document, Allocator* allocator, File* file);
 

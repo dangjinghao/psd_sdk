@@ -322,6 +322,109 @@ namespace
 
 		fileUtil::WriteToFileBE(writer, resourceSize);
 	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// ---------------------------------------------------------------------------------------------------------------------
+	struct MergedPlaneRle
+	{
+		uint8_t* data;
+		uint32_t size;
+	};
+
+	static bool CreateMergedImageRLE(Allocator* allocator, uint32_t width, uint32_t height, const uint8_t* const* planes, uint16_t planeCount,
+		uint16_t* outRowSizesBE, MergedPlaneRle* outPlaneRle)
+	{
+		const uint32_t rowBytes = width;
+		uint8_t* rowBuffer = memoryUtil::AllocateArray<uint8_t>(allocator, rowBytes * 2u);
+		bool ok = true;
+
+		for (uint16_t c = 0u; c < planeCount; ++c)
+		{
+			outPlaneRle[c].data = nullptr;
+			outPlaneRle[c].size = 0u;
+		}
+
+		for (uint16_t c = 0u; c < planeCount; ++c)
+		{
+			const uint8_t* plane = planes[c];
+			const uint32_t maxPlaneSize = rowBytes * 2u * height;
+			uint8_t* compressed = memoryUtil::AllocateArray<uint8_t>(allocator, maxPlaneSize);
+			uint32_t offset = 0u;
+
+			for (uint32_t y = 0u; y < height; ++y)
+			{
+				const uint8_t* srcRow = plane + y * rowBytes;
+				const unsigned int compressedSize = imageUtil::CompressRle(srcRow, rowBuffer, rowBytes);
+				if (compressedSize > 0xFFFFu)
+				{
+					ok = false;
+					break;
+				}
+
+				outRowSizesBE[c * height + y] = endianUtil::NativeToBigEndian(static_cast<uint16_t>(compressedSize));
+				memcpy(compressed + offset, rowBuffer, compressedSize);
+				offset += compressedSize;
+			}
+
+			outPlaneRle[c].data = compressed;
+			outPlaneRle[c].size = offset;
+
+			if (!ok)
+			{
+				break;
+			}
+		}
+
+		memoryUtil::FreeArray(allocator, rowBuffer);
+		return ok;
+	}
+
+	static void DestroyMergedImageRLE(Allocator* allocator, MergedPlaneRle* planeRle, uint16_t planeCount)
+	{
+		for (uint16_t c = 0u; c < planeCount; ++c)
+		{
+			memoryUtil::FreeArray(allocator, planeRle[c].data);
+			planeRle[c].data = nullptr;
+			planeRle[c].size = 0u;
+		}
+	}
+
+	static void WriteMergedImageZIP(SyncFileWriter& writer, const uint8_t* plane, uint32_t byteCount)
+	{
+		size_t zipDataSize = 0u;
+		void* zipData = tdefl_compress_mem_to_heap(plane, byteCount, &zipDataSize, TDEFL_WRITE_ZLIB_HEADER);
+		writer.Write(zipData, static_cast<uint32_t>(zipDataSize));
+		free(zipData);
+	}
+
+	static void WriteMergedImageZIPWithPrediction(Allocator* allocator, SyncFileWriter& writer, const uint8_t* plane, uint32_t width, uint32_t height)
+	{
+		// delta-encode each row
+		const uint32_t size = width * height;
+		uint8_t* deltaData = memoryUtil::AllocateArray<uint8_t>(allocator, size);
+		for (uint32_t y = 0u; y < height; ++y)
+		{
+			const uint8_t* src = plane + y * width;
+			uint8_t* dst = deltaData + y * width;
+			if (width == 0u)
+			{
+				continue;
+			}
+
+			dst[0] = src[0];
+			for (uint32_t x = 1u; x < width; ++x)
+			{
+				dst[x] = static_cast<uint8_t>((src[x] - src[x - 1u]) & 0xFFu);
+			}
+		}
+
+		size_t zipDataSize = 0u;
+		void* zipData = tdefl_compress_mem_to_heap(deltaData, size, &zipDataSize, TDEFL_WRITE_ZLIB_HEADER);
+		writer.Write(zipData, static_cast<uint32_t>(zipDataSize));
+		free(zipData);
+		memoryUtil::FreeArray(allocator, deltaData);
+	}
 }
 
 
@@ -336,6 +439,7 @@ ExportDocument* CreateExportDocument(Allocator* allocator, unsigned int canvasWi
 	document->height = canvasHeight;
 	document->bitsPerChannel = static_cast<uint16_t>(bitsPerChannel);
 	document->colorMode = colorMode;
+	document->mergedImageCompression = static_cast<uint16_t>(compressionType::RAW);
 
 	document->attributeCount = 0u;
 	document->layerCount = 0u;
@@ -940,6 +1044,15 @@ void UpdateMergedImage(ExportDocument* document, Allocator* allocator, const flo
 
 // ---------------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------------------------------
+void SetMergedImageCompression(ExportDocument* document, compressionType::Enum compression)
+{
+	PSD_ASSERT_NOT_NULL(document);
+	document->mergedImageCompression = static_cast<uint16_t>(compression);
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------------------------------
 void WriteDocument(ExportDocument* document, Allocator* allocator, File* file)
 {
 	SyncFileWriter writer(file);
@@ -1397,35 +1510,100 @@ void WriteDocument(ExportDocument* document, Allocator* allocator, File* file)
 	// for some reason, Photoshop insists on having an (uncompressed) Image Data section for 32-bit files.
 	// this is unfortunate, because it makes the files very large. don't think this is intentional, but rather a bug.
 	// additionally, for documents of a certain size, Photoshop also expects merged data to be there.
-	// hence we bite the bullet and just write the merged data section in all cases.
+	// hence we bite the bullet and just write the merged data section in 32-bit case.
 
 	// merged data section
 	{
-		const uint32_t size = document->width * document->height * document->bitsPerChannel / 8u;;
+		const uint32_t size = document->width * document->height * document->bitsPerChannel / 8u;
 		uint8_t* emptyMemory = memoryUtil::AllocateArray<uint8_t>(allocator, size);
 		memset(emptyMemory, 0, size);
 
-		// write merged image
-		fileUtil::WriteToFileBE(writer, static_cast<uint16_t>(compressionType::RAW));
+		// 32-bit files are kept RAW for compatibility (see comment above).
+		uint16_t mergedCompression = document->mergedImageCompression;
+		if (document->bitsPerChannel == 32u)
+		{
+			mergedCompression = static_cast<uint16_t>(compressionType::RAW);
+		}
+
+		// build plane list: [color planes][document alpha channels]
+		const uint16_t colorPlaneCount = static_cast<uint16_t>(document->colorMode);
+		const uint16_t planeCount = static_cast<uint16_t>(colorPlaneCount + document->alphaChannelCount);
+		const uint8_t* planes[exportColorMode::RGB + ExportDocument::MAX_ALPHA_CHANNEL_COUNT] = {};
 		if (document->colorMode == exportColorMode::GRAYSCALE)
 		{
-			const void* dataGray = document->mergedImageData[0] ? document->mergedImageData[0] : emptyMemory;
-			writer.Write(dataGray, size);
+			planes[0] = document->mergedImageData[0] ? reinterpret_cast<const uint8_t*>(document->mergedImageData[0]) : emptyMemory;
 		}
 		else if (document->colorMode == exportColorMode::RGB)
 		{
-			const void* dataR = document->mergedImageData[0] ? document->mergedImageData[0] : emptyMemory;
-			const void* dataG = document->mergedImageData[1] ? document->mergedImageData[1] : emptyMemory;
-			const void* dataB = document->mergedImageData[2] ? document->mergedImageData[2] : emptyMemory;
-			writer.Write(dataR, size);
-			writer.Write(dataG, size);
-			writer.Write(dataB, size);
+			planes[0] = document->mergedImageData[0] ? reinterpret_cast<const uint8_t*>(document->mergedImageData[0]) : emptyMemory;
+			planes[1] = document->mergedImageData[1] ? reinterpret_cast<const uint8_t*>(document->mergedImageData[1]) : emptyMemory;
+			planes[2] = document->mergedImageData[2] ? reinterpret_cast<const uint8_t*>(document->mergedImageData[2]) : emptyMemory;
+		}
+		for (uint16_t i = 0u; i < document->alphaChannelCount; ++i)
+		{
+			planes[colorPlaneCount + i] = document->alphaChannelData[i] ? reinterpret_cast<const uint8_t*>(document->alphaChannelData[i]) : emptyMemory;
 		}
 
-		// write alpha channels
-		for (unsigned int i = 0u; i < document->alphaChannelCount; ++i)
+		if (mergedCompression == static_cast<uint16_t>(compressionType::RAW))
 		{
-			writer.Write(document->alphaChannelData[i], size);
+			fileUtil::WriteToFileBE(writer, mergedCompression);
+			for (uint16_t c = 0u; c < planeCount; ++c)
+			{
+				writer.Write(planes[c], size);
+			}
+		}
+		else if ((mergedCompression == static_cast<uint16_t>(compressionType::RLE)) && (document->bitsPerChannel == 8u))
+		{
+			// RLE image data uses a single table of row sizes for all channels.
+			uint16_t* rowSizesBE = memoryUtil::AllocateArray<uint16_t>(allocator, planeCount * document->height);
+			MergedPlaneRle* planeRle = memoryUtil::AllocateArray<MergedPlaneRle>(allocator, planeCount);
+			const bool ok = CreateMergedImageRLE(allocator, document->width, document->height, planes, planeCount, rowSizesBE, planeRle);
+			if (ok)
+			{
+				fileUtil::WriteToFileBE(writer, mergedCompression);
+				writer.Write(rowSizesBE, planeCount * document->height * sizeof(uint16_t));
+				for (uint16_t c = 0u; c < planeCount; ++c)
+				{
+					writer.Write(planeRle[c].data, planeRle[c].size);
+				}
+			}
+			else
+			{
+				// fallback to ZIP if any row size exceeds 16-bit.
+				fileUtil::WriteToFileBE(writer, static_cast<uint16_t>(compressionType::ZIP));
+				for (uint16_t c = 0u; c < planeCount; ++c)
+				{
+					WriteMergedImageZIP(writer, planes[c], size);
+				}
+			}
+			DestroyMergedImageRLE(allocator, planeRle, planeCount);
+			memoryUtil::FreeArray(allocator, planeRle);
+			memoryUtil::FreeArray(allocator, rowSizesBE);
+		}
+		else if (mergedCompression == static_cast<uint16_t>(compressionType::ZIP))
+		{
+			fileUtil::WriteToFileBE(writer, mergedCompression);
+			for (uint16_t c = 0u; c < planeCount; ++c)
+			{
+				WriteMergedImageZIP(writer, planes[c], size);
+			}
+		}
+		else if ((mergedCompression == static_cast<uint16_t>(compressionType::ZIP_WITH_PREDICTION)) && (document->bitsPerChannel == 8u))
+		{
+			fileUtil::WriteToFileBE(writer, mergedCompression);
+			for (uint16_t c = 0u; c < planeCount; ++c)
+			{
+				WriteMergedImageZIPWithPrediction(allocator, writer, planes[c], document->width, document->height);
+			}
+		}
+		else
+		{
+			// unsupported combination -> RAW
+			fileUtil::WriteToFileBE(writer, static_cast<uint16_t>(compressionType::RAW));
+			for (uint16_t c = 0u; c < planeCount; ++c)
+			{
+				writer.Write(planes[c], size);
+			}
 		}
 
 		memoryUtil::FreeArray(allocator, emptyMemory);
